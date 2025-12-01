@@ -1,3 +1,4 @@
+
 import { Transaction } from "../types";
 
 declare global {
@@ -6,23 +7,73 @@ declare global {
   }
 }
 
-// Helper to convert image URL to Base64 using fetch (CORS friendly)
-const getBase64ImageFromURL = async (url: string): Promise<string> => {
+// Interface for Image Data with dimensions
+interface ProcessedImage {
+    data: string;
+    width: number;
+    height: number;
+    ratio: number;
+}
+
+// Helper to convert image URL to Base64 and get dimensions
+// Enhanced with double proxy fallback for CORS handling
+const getImageData = async (url: string): Promise<ProcessedImage> => {
+  const fetchImage = async (fetchUrl: string) => {
+      const response = await fetch(fetchUrl, { mode: 'cors' });
+      if (!response.ok) throw new Error('Network response was not ok');
+      return await response.blob();
+  };
+
+  const processBlob = (blob: Blob): Promise<ProcessedImage> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = reader.result as string;
+          const img = new Image();
+          img.src = base64;
+          img.onload = () => {
+              resolve({
+                  data: base64,
+                  width: img.width,
+                  height: img.height,
+                  ratio: img.width / img.height
+              });
+          };
+          img.onerror = () => reject(new Error("Failed to load image for dimensions"));
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+  };
+
   try {
-    const response = await fetch(url, { mode: 'cors' });
-    if (!response.ok) throw new Error('Network response was not ok');
-    const blob = await response.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  } catch (error) {
-    console.error("Erro ao carregar imagem (CORS ou URL inválida):", error);
-    return ""; // Retorna vazio para usar o fallback
+    // 1. Try Direct Fetch
+    const blob = await fetchImage(url);
+    return await processBlob(blob);
+  } catch (directError) {
+    console.warn("Direct image fetch failed, trying proxy 1...");
+    try {
+        // 2. Try AllOrigins Proxy
+        const proxyUrl1 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+        const blob1 = await fetchImage(proxyUrl1);
+        return await processBlob(blob1);
+    } catch (proxyError1) {
+        console.warn("Proxy 1 failed, trying proxy 2...");
+        try {
+            // 3. Try CorsProxy.io
+            const proxyUrl2 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+            const blob2 = await fetchImage(proxyUrl2);
+            return await processBlob(blob2);
+        } catch (proxyError2) {
+            console.error("All image fetch attempts failed.");
+            throw new Error("Could not load image via any method.");
+        }
+    }
   }
 };
+
+// URL padrão do Logotipo (Seiva da Nação) - Google Drive Direct Link
+const DEFAULT_LOGO_URL = "https://drive.google.com/uc?export=view&id=1-EoFPUZzWgms4VoE5uoYXBwOphg8Fz1J";
 
 export const generateReceipt = async (transaction: Transaction, customLogoUrl?: string): Promise<string> => {
   if (!window.jspdf) {
@@ -32,116 +83,164 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
 
   const { jsPDF } = window.jspdf;
   
-  // 1. Alteração de Orientação: Landscape (Paisagem)
+  // 1. Orientação: Landscape (Paisagem) - Duas vias
   const doc = new jsPDF({
     orientation: "landscape",
     unit: "mm",
     format: "a4"
   });
 
-  // --- CONFIGURATION ---
+  // --- CONFIGURAÇÃO ---
   const primaryColor = [19, 236, 128]; // #13ec80
   const darkColor = [16, 34, 25]; // #102219
   
-  // A4 Landscape Dimensions: 297mm x 210mm
+  // Dimensões A4 Paisagem: 297mm x 210mm
   const pageWidth = doc.internal.pageSize.width; // 297
   const pageHeight = doc.internal.pageSize.height; // 210
   const halfWidth = pageWidth / 2; // ~148.5
 
-  // --- LOGO LOADING ---
-  // Usa o URL customizado ou o padrão da Seiva da Nação
-  const defaultLogoUrl = "https://lh3.googleusercontent.com/aida-public/AB6AXuCZDNp2Av10aHiJmlEXi0rniz_bjBSeSZpQzEuLmF4GyO-vlXZuY5DaRqrv9x_v708sEZjAubHOzqUO0GB3S9ITDDNnkzOtn3wKd6RdmZQGI8CV1EBGjBzW-XUVrVWcWS0XEJKojsjPQ7o8fHgEz9lTr8vLQU4XK8WO7k6YRPfsPrKX8dYGGkPl-u9ZN5ToQr2jhRPu8nr_rGFC9s5YALZMjWSf4M8q9DrA6pvy7zqGc5ohf7l2_Jy8vMFi1MlTN__siPQsa8hcovPr";
-  const logoUrl = customLogoUrl && customLogoUrl.trim() !== "" ? customLogoUrl : defaultLogoUrl;
+  // --- CARREGAMENTO DO LOGO ---
+  const logoUrl = customLogoUrl && customLogoUrl.trim() !== "" ? customLogoUrl : DEFAULT_LOGO_URL;
+  let logoData: ProcessedImage | null = null;
   
-  let logoBase64 = "";
   try {
-      logoBase64 = await getBase64ImageFromURL(logoUrl);
+      logoData = await getImageData(logoUrl);
   } catch (e) {
-      console.log("Falha ao carregar imagem, usando fallback desenhado.");
+      console.log("Falha ao carregar imagem, usando fallback.");
   }
 
-  // --- FUNCTION TO DRAW ONE SIDE ---
+  // --- FUNÇÃO PARA DESENHAR UMA VIA (LADO) ---
   const drawReceiptSide = (offsetX: number, title: string) => {
       const margin = 10;
       const contentWidth = halfWidth - (margin * 2);
       let cursorY = 10;
 
-      // Via Title
+      // Título da Via (Instituição vs Encarregado)
       doc.setFontSize(8);
       doc.setFont("helvetica", "italic");
-      doc.setTextColor(100, 100, 100);
+      doc.setTextColor(150, 150, 150);
       doc.text(title, offsetX + halfWidth / 2, cursorY, { align: "center" });
       cursorY += 5;
 
-      // Logo
-      if (logoBase64) {
+      // --- LOGOTIPO (ESCALONADO E CENTRALIZADO) ---
+      const logoBoxSize = 30; // 30mm x 30mm box
+      const logoX = offsetX + margin;
+      const logoY = cursorY;
+
+      if (logoData) {
         try {
-            doc.addImage(logoBase64, 'PNG', offsetX + margin, cursorY, 30, 30);
+            let w = logoBoxSize;
+            let h = logoBoxSize;
+
+            // Lógica de Escalonamento (Manter Aspect Ratio)
+            if (logoData.ratio > 1) {
+                // Imagem larga (Landscape)
+                w = logoBoxSize;
+                h = logoBoxSize / logoData.ratio;
+            } else {
+                // Imagem alta (Portrait) ou Quadrada
+                h = logoBoxSize;
+                w = logoBoxSize * logoData.ratio;
+            }
+
+            // Lógica de Centralização dentro do Box
+            const centeredX = logoX + (logoBoxSize - w) / 2;
+            const centeredY = logoY + (logoBoxSize - h) / 2;
+
+            doc.addImage(logoData.data, 'PNG', centeredX, centeredY, w, h);
         } catch (err) {
-            // Fallback se a imagem estiver corrompida ou formato inválido
-             doc.setFillColor(200, 255, 200);
-             doc.circle(offsetX + margin + 15, cursorY + 15, 15, 'F');
-             doc.setFontSize(10);
-             doc.setTextColor(...primaryColor);
-             doc.text("SN", offsetX + margin + 15, cursorY + 15, { align: 'center', baseline: 'middle' });
+             drawFallbackLogo(logoX, logoY);
         }
       } else {
-         // Fallback desenhado (Círculo Verde) se não baixou a imagem
-         doc.setFillColor(...primaryColor);
-         doc.circle(offsetX + margin + 15, cursorY + 15, 15, 'F'); // Raio 15 (Diâmetro 30)
-         doc.setFontSize(12);
-         doc.setTextColor(255, 255, 255);
-         doc.text("SN", offsetX + margin + 15, cursorY + 15, { align: 'center', baseline: 'middle' });
+         drawFallbackLogo(logoX, logoY);
       }
 
-      // Header Text (Ajustado X para não sobrepor o logo maior)
-      const textStartX = offsetX + margin + 35; 
+      // Função auxiliar para logo fallback
+      function drawFallbackLogo(x: number, y: number) {
+         doc.setFillColor(200, 255, 200);
+         doc.roundedRect(x, y, 30, 30, 3, 3, 'F');
+         doc.setFontSize(14);
+         doc.setTextColor(...primaryColor);
+         doc.setFont("helvetica", "bold");
+         doc.text("SN", x + 15, y + 15, { align: 'center', baseline: 'middle' });
+      }
+
+      // Cabeçalho de Texto (Ao lado do Logo)
+      const textStartX = offsetX + margin + 35; // 10 (margem) + 30 (logo) + 5 (espaço)
       
-      doc.setFontSize(14);
+      doc.setFontSize(13);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(...darkColor);
-      doc.text("ESCOLA SEIVA DA NAÇÃO", textStartX, cursorY + 8);
+      doc.text("ESCOLA SEIVA DA NAÇÃO", textStartX, cursorY + 6);
 
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
       doc.setTextColor(60, 60, 60);
-      doc.text("Av. Samora Machel, Mussumbuluco", textStartX, cursorY + 14);
-      doc.text("Maputo - Moçambique", textStartX, cursorY + 18);
-      doc.text("Contato: +258 84 269 6623", textStartX, cursorY + 22);
+      
+      // Endereço e Contatos Atualizados
+      doc.text("Av. Samora Machel, Bairro de Mussumbuluco", textStartX, cursorY + 11);
+      doc.text("No 90/1/A e 90/1/C | Matola - Moçambique", textStartX, cursorY + 15);
+      doc.text("Cell: 842 696 623 / 877 236 290", textStartX, cursorY + 19);
+      doc.text("NUIT: 401 932 712", textStartX, cursorY + 23);
 
-      cursorY += 35;
+      cursorY += 35; // Espaço reservado para o cabeçalho
 
-      // Divider Line
+      // Linha Divisória
       doc.setDrawColor(...primaryColor);
       doc.setLineWidth(0.5);
       doc.line(offsetX + margin, cursorY, offsetX + halfWidth - margin, cursorY);
       cursorY += 8;
 
-      // Title Receipt
+      // Título do Documento
       doc.setFontSize(12);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(...darkColor);
       doc.text("RECIBO DE PAGAMENTO", offsetX + halfWidth / 2, cursorY, { align: "center" });
       cursorY += 8;
 
-      // Receipt Meta Info
+      // Informações Meta (Data, ID)
       doc.setFontSize(9);
       doc.setFont("helvetica", "normal");
       doc.setTextColor(100, 100, 100);
       
-      const dateStr = new Date().toLocaleDateString('pt-BR') + ' ' + new Date().toLocaleTimeString('pt-BR');
+      // Data com Fuso Horário de Moçambique
+      const now = new Date();
+      const dateStr = now.toLocaleDateString('pt-BR', { timeZone: 'Africa/Maputo' }) + ' ' + now.toLocaleTimeString('pt-BR', { timeZone: 'Africa/Maputo', hour: '2-digit', minute: '2-digit' });
+      
       doc.text(`Emissão: ${dateStr}`, offsetX + halfWidth - margin, cursorY, { align: "right" });
       doc.text(`Ref: #${transaction.id}`, offsetX + margin, cursorY, { align: "left" });
       
       cursorY += 5;
 
-      // --- TABLE (2. Atualização de Conteúdo) ---
-      // Columns: Descrição, Forma Pagto, Tipo, Valor
+      // --- ADDED: DATA DO PAGAMENTO ---
+      // Fix date format manually to avoid timezone shifts
+      const paymentDate = transaction.date.split('-').reverse().join('/');
+      doc.text(`Data Pagamento: ${paymentDate}`, offsetX + margin, cursorY, { align: "left" });
+      
+      cursorY += 5;
+
+      // INFO ALUNO (SE HOUVER)
+      if (transaction.student_name) {
+          doc.setFillColor(245, 245, 245);
+          doc.roundedRect(offsetX + margin, cursorY, contentWidth, 8, 1, 1, 'F');
+          
+          doc.setFontSize(9);
+          doc.setTextColor(80, 80, 80);
+          doc.text("Aluno(a):", offsetX + margin + 2, cursorY + 5);
+          
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(...darkColor);
+          doc.text(transaction.student_name, offsetX + margin + 18, cursorY + 5);
+          
+          cursorY += 10;
+      }
+
+      // --- TABELA DE DADOS ---
       const tableColumn = ["Descrição", "Forma Pagto", "Tipo", "Valor (MZN)"];
       const tableRows = [
         [
           transaction.description,
-          transaction.paymentMethod || "N/A", // Nova coluna
+          transaction.paymentMethod || "N/A",
           transaction.type,
           transaction.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })
         ]
@@ -151,7 +250,7 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
         head: [tableColumn],
         body: tableRows,
         startY: cursorY,
-        margin: { left: offsetX + margin, right: pageWidth - (offsetX + halfWidth) + margin }, // Constrain to current side
+        margin: { left: offsetX + margin, right: pageWidth - (offsetX + halfWidth) + margin },
         tableWidth: contentWidth,
         theme: 'grid',
         headStyles: {
@@ -173,18 +272,18 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
         }
       });
 
-      // Get final Y
+      // Posição após a tabela
       cursorY = (doc as any).lastAutoTable.finalY + 15;
 
-      // Total
+      // Total Destacado
       doc.setFontSize(11);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(...darkColor);
-      doc.text(`Total: MZN ${transaction.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, offsetX + halfWidth - margin, cursorY, { align: "right" });
+      doc.text(`Total Pago: MZN ${transaction.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, offsetX + halfWidth - margin, cursorY, { align: "right" });
       
       cursorY += 25;
 
-      // Signature
+      // Assinatura
       doc.setDrawColor(150, 150, 150);
       doc.setLineWidth(0.3);
       doc.line(offsetX + halfWidth / 2 - 30, cursorY, offsetX + halfWidth / 2 + 30, cursorY);
@@ -195,24 +294,206 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
       doc.setTextColor(100, 100, 100);
       doc.text("Tesouraria / Carimbo Digital", offsetX + halfWidth / 2, cursorY, { align: "center" });
 
-      // Footer
+      // Rodapé
       doc.setFontSize(8);
       doc.setTextColor(...primaryColor);
       doc.setFont("helvetica", "bold italic");
       doc.text("Obrigado por fazer parte da família Seiva da Nação!", offsetX + halfWidth / 2, pageHeight - 10, { align: "center" });
   };
 
-  // Draw Left Side (Instituição)
+  // Desenha Lado Esquerdo
   drawReceiptSide(0, "Via da Instituição");
 
-  // Draw Right Side (Encarregado)
+  // Desenha Lado Direito
   drawReceiptSide(halfWidth, "Via do Encarregado");
 
-  // --- CUT LINE (1. Linha pontilhada no meio) ---
-  doc.setDrawColor(180, 180, 180);
+  // --- LINHA DE CORTE (Pontilhada no meio) ---
+  doc.setDrawColor(200, 200, 200);
   doc.setLineWidth(0.5);
-  doc.setLineDashPattern([3, 3], 0); // Dotted line
+  doc.setLineDashPattern([3, 3], 0); // Pontilhado
   doc.line(halfWidth, 10, halfWidth, pageHeight - 10);
 
   return doc.output("bloburl");
 };
+
+// --- GERAÇÃO DE RELATÓRIO MENSAL (EXTRATO) ---
+export const generateMonthlyReport = async (transactions: Transaction[], month: number, year: number, customLogoUrl?: string): Promise<string> => {
+    if (!window.jspdf) {
+      console.error("jsPDF not loaded");
+      return "";
+    }
+  
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({
+      orientation: "portrait",
+      unit: "mm",
+      format: "a4"
+    });
+  
+    const primaryColor = [19, 236, 128]; 
+    const darkColor = [16, 34, 25];
+    const pageWidth = doc.internal.pageSize.width;
+    const pageHeight = doc.internal.pageSize.height;
+    
+    // --- CARREGAMENTO DO LOGO ---
+    const logoUrl = customLogoUrl && customLogoUrl.trim() !== "" ? customLogoUrl : DEFAULT_LOGO_URL;
+    let logoData: ProcessedImage | null = null;
+    try { logoData = await getImageData(logoUrl); } catch (e) {}
+  
+    // --- CABEÇALHO ---
+    let cursorY = 20;
+    const margin = 15;
+  
+    // Desenha o logo ou o fallback (Centralizado e Scaled)
+    const logoBoxSize = 25;
+    if (logoData) {
+      try {
+          let w = logoBoxSize;
+          let h = logoBoxSize;
+          if (logoData.ratio > 1) { w = logoBoxSize; h = logoBoxSize / logoData.ratio; } 
+          else { h = logoBoxSize; w = logoBoxSize * logoData.ratio; }
+          const centeredX = margin + (logoBoxSize - w) / 2;
+          const centeredY = (cursorY - 5) + (logoBoxSize - h) / 2;
+          doc.addImage(logoData.data, 'PNG', centeredX, centeredY, w, h);
+      } catch (err) {
+          drawFallbackReportLogo(margin, cursorY);
+      }
+    } else {
+        drawFallbackReportLogo(margin, cursorY);
+    }
+
+    function drawFallbackReportLogo(x: number, y: number) {
+        doc.setFillColor(...primaryColor);
+        doc.roundedRect(x, y - 5, 25, 25, 2, 2, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(10);
+        doc.text("SN", x + 12.5, y + 7.5, { align: 'center', baseline: 'middle' });
+    }
+  
+    // Título do Relatório
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.setTextColor(...darkColor);
+    doc.text("EXTRATO MENSAL", pageWidth - margin, cursorY + 5, { align: "right" });
+    
+    // Detalhes do Período
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.setTextColor(100, 100, 100);
+    const monthName = new Date(year, month).toLocaleString('pt-BR', { month: 'long' });
+    const capitalizedMonth = monthName.charAt(0).toUpperCase() + monthName.slice(1);
+    doc.text(`Período: ${capitalizedMonth} / ${year}`, pageWidth - margin, cursorY + 12, { align: "right" });
+    
+    // Data de Geração (Fuso Horário MOZ)
+    const now = new Date();
+    const genDate = now.toLocaleDateString('pt-BR', { timeZone: 'Africa/Maputo' });
+    doc.text(`Gerado em: ${genDate}`, pageWidth - margin, cursorY + 17, { align: "right" });
+  
+    // Dados da Escola (Ao lado do logo)
+    doc.setFontSize(12);
+    doc.setTextColor(...darkColor);
+    doc.setFont("helvetica", "bold");
+    doc.text("ESCOLA SEIVA DA NAÇÃO", margin + 30, cursorY);
+    
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(60, 60, 60);
+    
+    // Endereço e Contatos Atualizados (Relatório)
+    doc.text("Av. Samora Machel, Bairro de Mussumbuluco", margin + 30, cursorY + 5);
+    doc.text("No 90/1/A e 90/1/C | Matola - Moçambique", margin + 30, cursorY + 9);
+    doc.text("Cell: 842 696 623 / 877 236 290 | NUIT: 401 932 712", margin + 30, cursorY + 13);
+  
+    cursorY += 35;
+  
+    // --- CAIXAS DE RESUMO (Entradas, Saídas, Saldo) ---
+    const totalIncome = transactions.filter(t => t.category === 'income').reduce((acc, t) => acc + t.amount, 0);
+    const totalExpense = transactions.filter(t => t.category === 'expense').reduce((acc, t) => acc + t.amount, 0);
+    const balance = totalIncome - totalExpense;
+  
+    const boxWidth = (pageWidth - (margin * 2) - 10) / 3;
+    const boxHeight = 25;
+  
+    // Caixa Receitas
+    doc.setFillColor(240, 253, 244); // Verde claro
+    doc.setDrawColor(20, 200, 100);
+    doc.roundedRect(margin, cursorY, boxWidth, boxHeight, 2, 2, 'FD');
+    doc.setFontSize(8);
+    doc.setTextColor(20, 150, 80);
+    doc.text("TOTAL RECEITAS", margin + 5, cursorY + 8);
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.text(`+ ${totalIncome.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, margin + 5, cursorY + 18);
+  
+    // Caixa Despesas
+    doc.setFillColor(254, 242, 242); // Vermelho claro
+    doc.setDrawColor(240, 80, 80);
+    doc.roundedRect(margin + boxWidth + 5, cursorY, boxWidth, boxHeight, 2, 2, 'FD');
+    doc.setFontSize(8);
+    doc.setTextColor(200, 50, 50);
+    doc.text("TOTAL DESPESAS", margin + boxWidth + 10, cursorY + 8);
+    doc.setFontSize(12);
+    doc.text(`- ${totalExpense.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, margin + boxWidth + 10, cursorY + 18);
+  
+    // Caixa Saldo
+    doc.setFillColor(248, 250, 252); // Cinza claro
+    doc.setDrawColor(150, 150, 150);
+    doc.roundedRect(margin + (boxWidth * 2) + 10, cursorY, boxWidth, boxHeight, 2, 2, 'FD');
+    doc.setFontSize(8);
+    doc.setTextColor(80, 80, 80);
+    doc.text("SALDO DO PERÍODO", margin + (boxWidth * 2) + 15, cursorY + 8);
+    doc.setFontSize(12);
+    doc.setTextColor(balance >= 0 ? 20 : 200, balance >= 0 ? 150 : 50, balance >= 0 ? 80 : 50);
+    doc.text(`${balance >= 0 ? '+' : ''} ${balance.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, margin + (boxWidth * 2) + 15, cursorY + 18);
+  
+    cursorY += 35;
+  
+    // --- TABELA DE TRANSAÇÕES ---
+    const tableColumn = ["Data", "Descrição", "Conta (PGC)", "Forma Pagto", "Valor (MZN)"];
+    
+    // Ordenar por data (String Compare Safe for ISO)
+    const sortedTransactions = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  
+    const tableRows = sortedTransactions.map(t => [
+      t.date.split('-').reverse().join('/'), // Manual formatting DD/MM/YYYY
+      t.student_name ? `${t.description} (Aluno: ${t.student_name})` : t.description, // Include student in report
+      t.account_code ? `${t.account_code}` : t.type, // Código PGC
+      t.paymentMethod || '-',
+      { 
+        content: (t.category === 'expense' ? '- ' : '+ ') + t.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 }),
+        styles: { 
+            textColor: t.category === 'expense' ? [220, 50, 50] : [20, 180, 80],
+            fontStyle: 'bold',
+            halign: 'right'
+        }
+      }
+    ]);
+  
+    doc.autoTable({
+      head: [tableColumn],
+      body: tableRows,
+      startY: cursorY,
+      theme: 'striped',
+      styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [...darkColor], textColor: [255, 255, 255] },
+      columnStyles: {
+        0: { cellWidth: 20 },
+        1: { cellWidth: 'auto' }, 
+        2: { cellWidth: 30 },     // Conta PGC
+        3: { cellWidth: 25 },     // Forma Pagto
+        4: { cellWidth: 35, halign: 'right' }
+      }
+    });
+  
+    // --- RODAPÉ ---
+    const pageCount = (doc as any).internal.getNumberOfPages();
+    for(let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor(150, 150, 150);
+        doc.text(`Página ${i} de ${pageCount}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+        doc.text("Sistema Seiva da Nação - Documento gerado eletronicamente", pageWidth / 2, pageHeight - 6, { align: 'center' });
+    }
+  
+    return doc.output("bloburl");
+  };

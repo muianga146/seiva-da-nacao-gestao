@@ -1,22 +1,87 @@
 
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { ViewState, Transaction, Student, ImageSize, ChatMessage } from './types';
-import { CashFlowChart, TrendChart } from './components/DashboardCharts';
+import { ViewState, Transaction, Student, ImageSize, ChatMessage, PGCAccount } from './types';
+import { CashFlowChart } from './components/DashboardCharts';
 import { generateImage, chatWithAI, generateSpeech } from './services/geminiService';
-import { generateReceipt } from './services/pdfService';
+import { generateReceipt, generateMonthlyReport } from './services/pdfService';
 import { 
   fetchTransactions, 
   addTransactionToDb, 
   deleteTransactionFromDb, 
   fetchStudents, 
   addStudentToDb, 
-  deleteStudentFromDb 
+  deleteStudentFromDb,
+  updateStudentStatus
 } from './services/dataService';
 
 // --- CONSTANTS ---
 const SCHOOL_CLASSES = ["1ª Classe", "2ª Classe", "3ª Classe", "4ª Classe", "5ª Classe", "6ª Classe"];
 const PAYMENT_METHODS = ["Numerário", "M-Pesa", "Transferência", "POS"];
-const DEFAULT_LOGO = "https://lh3.googleusercontent.com/aida-public/AB6AXuCZDNp2Av10aHiJmlEXi0rniz_bjBSeSZpQzEuLmF4GyO-vlXZuY5DaRqrv9x_v708sEZjAubHOzqUO0GB3S9ITDDNnkzOtn3wKd6RdmZQGI8CV1EBGjBzW-XUVrVWcWS0XEJKojsjPQ7o8fHgEz9lTr8vLQU4XK8WO7k6YRPfsPrKX8dYGGkPl-u9ZN5ToQr2jhRPu8nr_rGFC9s5YALZMjWSf4M8q9DrA6pvy7zqGc5ohf7l2_Jy8vMFi1MlTN__siPQsa8hcovPr";
+// Updated to Google Drive Direct Link from user request
+const DEFAULT_LOGO = "https://drive.google.com/uc?export=view&id=1-EoFPUZzWgms4VoE5uoYXBwOphg8Fz1J";
+
+// TUITION LOGIC CONSTANTS
+const BASE_TUITION_VALUE = 2310;
+const PENALTY_DAY_THRESHOLD = 10; // Until day 10 is normal
+const PENALTY_PERCENTAGE = 0.25; // 25%
+
+// Helper to get current date in Maputo Timezone (YYYY-MM-DD)
+const getMaputoDate = () => {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Maputo' });
+};
+
+// --- PGC-NIRF CHART OF ACCOUNTS ---
+const PGC_ACCOUNTS: PGCAccount[] = [
+  // Classe 1: Meios financeiros
+  { code: "1.1", name: "Caixa", class: "1" },
+  { code: "1.2", name: "Bancos", class: "1" },
+  { code: "1.3", name: "Outros meios financeiros", class: "1" },
+  
+  // Classe 2: Inventários e activos biológicos
+  { code: "2.1", name: "Compras", class: "2" },
+  { code: "2.2", name: "Mercadorias", class: "2" },
+  { code: "2.3", name: "Produtos acabados e intermédios", class: "2" },
+  { code: "2.6", name: "Matérias primas, auxiliares e materiais", class: "2" },
+  
+  // Classe 3: Investimentos de Capital
+  { code: "3.2", name: "Activos Tangíveis (Mobiliário, Equipamentos)", class: "3" },
+  { code: "3.3", name: "Activos Intangíveis (Software, Licenças)", class: "3" },
+  
+  // Classe 4: Contas a receber/pagar
+  { code: "4.1", name: "Clientes (Pais/Alunos)", class: "4" },
+  { code: "4.2", name: "Fornecedores", class: "4" },
+  { code: "4.4", name: "Estado", class: "4" },
+  
+  // Classe 5: Capital Próprio
+  { code: "5.1", name: "Capital", class: "5" },
+  
+  // Classe 6: Gastos e Perdas (DESPESAS)
+  { code: "6.1", name: "Custo dos Inventários", class: "6" },
+  { code: "6.2", name: "Gastos com Pessoal (Salários, INSS)", class: "6" },
+  { code: "6.3", name: "Fornecimento de Serviços de Terceiros (Água, Luz, Net)", class: "6" },
+  { code: "6.5", name: "Amortizações do período", class: "6" },
+  { code: "6.8", name: "Outros Gastos e Perdas Operacionais", class: "6" },
+  { code: "6.9", name: "Gastos e Perdas Financeiros (Juros, Taxas)", class: "6" },
+  
+  // Classe 7: Rendimentos e Ganhos (RECEITAS)
+  { code: "7.1", name: "Vendas (Uniformes, Livros)", class: "7" },
+  { code: "7.2", name: "Prestação de serviços (Mensalidades, Matrículas)", class: "7" },
+  { code: "7.5", name: "Rendimentos Suplementares", class: "7" },
+  { code: "7.6", name: "Outros Rendimentos Operacionais", class: "7" },
+  { code: "7.8", name: "Rendimentos Financeiros", class: "7" },
+];
+
+const getAccountsForTransactionType = (type: 'income' | 'expense') => {
+  if (type === 'income') {
+    // Receitas geralmente Classe 7, mas pode incluir vendas de ativos
+    return PGC_ACCOUNTS.filter(acc => acc.class === "7" || acc.code === "1.1" || acc.code === "1.2"); 
+  } else {
+    // Despesas geralmente Classe 6, mas inclui compras de ativos (Classe 2 e 3)
+    return PGC_ACCOUNTS.filter(acc => ["2", "3", "6"].includes(acc.class) || ["4.2", "4.4"].includes(acc.code));
+  }
+};
+
+type DashboardPeriod = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'semestral' | 'annual';
 
 // --- SUB-COMPONENTS ---
 
@@ -35,7 +100,7 @@ const SidebarItem = ({ icon, label, active, onClick, highlight = false }: { icon
 );
 
 const Card = ({ title, value, trend, positive = true, icon }: { title: string, value: string, trend?: string, positive?: boolean, icon?: string }) => (
-  <div className="bg-white dark:bg-surface-dark p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800 flex flex-col gap-4">
+  <div className="bg-white dark:bg-surface-dark p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800 flex flex-col gap-4 transition-all hover:shadow-md">
     <div className="flex items-center gap-2 text-text-secondary dark:text-gray-400">
       {icon && <span className="material-symbols-outlined text-xl">{icon}</span>}
       <span className="font-medium text-sm">{title}</span>
@@ -86,11 +151,19 @@ export default function App() {
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [dbError, setDbError] = useState(false);
 
+  // DASHBOARD STATE
+  const [dashboardPeriod, setDashboardPeriod] = useState<DashboardPeriod>('annual');
+
   // SETTINGS STATE
   const [schoolLogoUrl, setSchoolLogoUrl] = useState(localStorage.getItem('schoolLogoUrl') || DEFAULT_LOGO);
 
   // STUDENTS VIEW STATE
   const [selectedClassTab, setSelectedClassTab] = useState(SCHOOL_CLASSES[0]);
+
+  // REPORTS STATE
+  const [reportMonth, setReportMonth] = useState(new Date().getMonth());
+  const [reportYear, setReportYear] = useState(new Date().getFullYear());
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
 
   // MODAL STATE
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -102,14 +175,30 @@ export default function App() {
   const [receiptUrl, setReceiptUrl] = useState<string | null>(null);
 
   // FORMS STATE
-  const [newStudent, setNewStudent] = useState({ name: '', class: SCHOOL_CLASSES[0], guardian: '', status: 'Paid' });
-  const [newTransaction, setNewTransaction] = useState({ 
+  const [newStudent, setNewStudent] = useState({ name: '', class: SCHOOL_CLASSES[0], guardian: '', status: 'Pending' });
+  const [newTransaction, setNewTransaction] = useState<{
+      type: string;
+      description: string;
+      amount: string;
+      date: string;
+      paymentMethod: string;
+      account_code: string;
+      student_id?: string | number;
+      student_name?: string;
+  }>({ 
       type: '', 
       description: '', 
       amount: '', 
-      date: new Date().toISOString().split('T')[0],
-      paymentMethod: 'Numerário'
+      date: getMaputoDate(), // Use Maputo Timezone
+      paymentMethod: 'Numerário',
+      account_code: '',
+      student_id: '',
+      student_name: ''
   });
+
+  // STUDENT SEARCH STATE (FOR TRANSACTION MODAL)
+  const [studentSearchTerm, setStudentSearchTerm] = useState('');
+  const [showStudentSuggestions, setShowStudentSuggestions] = useState(false);
 
   // AI State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -124,7 +213,7 @@ export default function App() {
   const [ttsText, setTtsText] = useState('');
   const [isTtsLoading, setIsTtsLoading] = useState(false);
 
-  // --- EFFECT: LOAD DATA ---
+  // --- EFFECT: LOAD DATA AND SYNC STATUS ---
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
@@ -135,20 +224,68 @@ export default function App() {
     setIsLoadingData(true);
     setDbError(false);
     try {
-      // Fetch data
-      const txsResult = await fetchTransactions();
-      const stusResult = await fetchStudents();
+      // Fetch raw data
+      const [txsResult, stusResult] = await Promise.all([
+          fetchTransactions(),
+          fetchStudents()
+      ]);
 
-      // Check for database errors (null return indicates error)
       if (txsResult === null || stusResult === null) {
         setDbError(true);
-        // Fallback to empty arrays to keep app running
         setTransactions([]);
         setStudents([]);
-      } else {
-        setTransactions(txsResult);
-        setStudents(stusResult);
+        return;
       }
+
+      setTransactions(txsResult);
+
+      // --- LOGIC: SYNC STUDENT STATUS BASED ON CURRENT MONTH ---
+      const now = new Date();
+      // Mês atual REAL (1-12) para comparar com a string da data "YYYY-MM-DD"
+      const currentRealMonth = now.getMonth() + 1; 
+      const currentYear = now.getFullYear();
+      const currentDay = now.getDate();
+
+      const syncedStudents = await Promise.all(stusResult.map(async (student) => {
+          // Check if this student paid tuition in the CURRENT month
+          // Tuition account code = '7.2'
+          const hasPaidThisMonth = txsResult.some(t => {
+              // Parse date string directly to avoid timezone issues: "2024-12-01" -> [2024, 12, 01]
+              const [tYear, tMonth] = t.date.split('-').map(Number);
+              
+              return t.category === 'income' &&
+                     String(t.student_id) === String(student.id) &&
+                     t.account_code === '7.2' &&
+                     tMonth === currentRealMonth &&
+                     tYear === currentYear;
+          });
+
+          let correctStatus: 'Paid' | 'Late' | 'Pending' = 'Pending';
+
+          if (hasPaidThisMonth) {
+              correctStatus = 'Paid';
+          } else {
+              // If no payment, check date for penalty
+              if (currentDay > PENALTY_DAY_THRESHOLD) {
+                  correctStatus = 'Late';
+              } else {
+                  correctStatus = 'Pending';
+              }
+          }
+
+          // If status in DB is different from reality, update it
+          if (student.status !== correctStatus) {
+              // Update in DB (fire and forget for performance in loop, or await if critical)
+              await updateStudentStatus(student.id, correctStatus);
+              // Return updated object for local state
+              return { ...student, status: correctStatus };
+          }
+
+          return student;
+      }));
+
+      setStudents(syncedStudents);
+
     } catch (error) {
       console.error("Failed to load data", error);
       setDbError(true);
@@ -157,38 +294,107 @@ export default function App() {
     }
   };
 
+  // --- EFFECT: AUTO-CALCULATE TUITION WITH PENALTY ---
+  useEffect(() => {
+    // Só aplica a lógica se for Receita e for o código 7.2 (Prestação de serviços - Mensalidades)
+    if (transactionCategory === 'income' && newTransaction.account_code === '7.2') {
+        const dateObj = new Date(newTransaction.date);
+        const day = dateObj.getDate();
+        
+        // Regra de negócio: Dia > 10 aplica multa de 25%
+        let calculatedAmount = BASE_TUITION_VALUE;
+        
+        if (day > PENALTY_DAY_THRESHOLD) {
+            calculatedAmount = BASE_TUITION_VALUE * (1 + PENALTY_PERCENTAGE);
+        }
+
+        // Atualiza o valor no formulário
+        setNewTransaction(prev => ({
+            ...prev,
+            amount: calculatedAmount.toString()
+        }));
+    }
+  }, [newTransaction.date, newTransaction.account_code, transactionCategory]);
+
+
   // --- DERIVED DATA FOR DASHBOARD ---
   const dashboardData = useMemo(() => {
-    const income = transactions.filter(t => t.category === 'income').reduce((acc, curr) => acc + curr.amount, 0);
-    const expense = transactions.filter(t => t.category === 'expense').reduce((acc, curr) => acc + curr.amount, 0);
+    const today = new Date();
+    
+    // Filter logic based on selected period
+    const isInPeriod = (dateStr: string) => {
+        const [year, month, day] = dateStr.split('-').map(Number);
+        const txDate = new Date(year, month - 1, day);
+        
+        switch (dashboardPeriod) {
+            case 'daily':
+                return txDate.toDateString() === today.toDateString();
+            case 'weekly': {
+                const oneWeekAgo = new Date(today);
+                oneWeekAgo.setDate(today.getDate() - 7);
+                return txDate >= oneWeekAgo && txDate <= today;
+            }
+            case 'monthly':
+                return txDate.getMonth() === today.getMonth() && txDate.getFullYear() === today.getFullYear();
+            case 'quarterly': {
+                const currentQuarter = Math.floor(today.getMonth() / 3);
+                const txQuarter = Math.floor(txDate.getMonth() / 3);
+                return txQuarter === currentQuarter && txDate.getFullYear() === today.getFullYear();
+            }
+            case 'semestral': {
+                const currentSemester = today.getMonth() < 6 ? 0 : 1;
+                const txSemester = txDate.getMonth() < 6 ? 0 : 1;
+                return txSemester === currentSemester && txDate.getFullYear() === today.getFullYear();
+            }
+            case 'annual':
+                return txDate.getFullYear() === today.getFullYear();
+            default:
+                return true;
+        }
+    };
+
+    const filteredTransactions = transactions.filter(t => isInPeriod(t.date));
+
+    const income = filteredTransactions.filter(t => t.category === 'income').reduce((acc, curr) => acc + curr.amount, 0);
+    const expense = filteredTransactions.filter(t => t.category === 'expense').reduce((acc, curr) => acc + curr.amount, 0);
     const balance = income - expense;
 
-    // Monthly Data for Bar Chart
-    const monthlyDataMap = new Map<string, { entrada: number; saida: number }>();
+    // Monthly Data for Bar Chart - Always show 12 months of CURRENT year
     const monthNames = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
     
-    transactions.forEach(t => {
-        const date = new Date(t.date);
-        const month = monthNames[date.getMonth()];
-        if (!monthlyDataMap.has(month)) {
-            monthlyDataMap.set(month, { entrada: 0, saida: 0 });
-        }
-        const data = monthlyDataMap.get(month)!;
-        if (t.category === 'income') data.entrada += t.amount;
-        else data.saida += t.amount;
-    });
-
-    // Fill missing months up to current or just show existing (sorted)
-    const chartData = Array.from(monthlyDataMap.entries()).map(([name, values]) => ({ name, ...values }));
+    // Initialize array with all 12 months zeroed out
+    const chartData = monthNames.map(name => ({ name, entrada: 0, saida: 0 }));
     
-    // Annual/Trend Data (Start 2026)
-    const trendData = [
-        { name: '2026', income: income, expense: expense },
-        { name: '2027', income: income * 1.15, expense: expense * 1.05 }, // Projected growth
-    ];
+    const currentYear = new Date().getFullYear();
 
-    return { income, expense, balance, chartData, trendData };
-  }, [transactions]);
+    transactions.forEach(t => {
+        // Parse date reliably from string "YYYY-MM-DD"
+        const parts = t.date.split('-');
+        if (parts.length === 3) {
+            const year = parseInt(parts[0]);
+            const month = parseInt(parts[1]); // 1-12
+            
+            // Only aggregate for current year
+            if (year === currentYear) {
+                // Adjust to 0-11 index
+                const index = month - 1;
+                
+                if (index >= 0 && index < 12) {
+                    if (t.category === 'income') chartData[index].entrada += t.amount;
+                    else chartData[index].saida += t.amount;
+                }
+            }
+        }
+    });
+    
+    return { income, expense, balance, chartData };
+  }, [transactions, dashboardPeriod]);
+
+  // --- STUDENT SEARCH FILTER ---
+  const filteredStudents = useMemo(() => {
+      if (!studentSearchTerm) return [];
+      return students.filter(s => s.name.toLowerCase().includes(studentSearchTerm.toLowerCase())).slice(0, 5);
+  }, [students, studentSearchTerm]);
 
 
   // --- HANDLERS ---
@@ -222,21 +428,56 @@ export default function App() {
       alert("Configurações salvas com sucesso!");
   }
 
+  const handleGenerateReport = async () => {
+      setIsGeneratingReport(true);
+      try {
+          const filteredTransactions = transactions.filter(t => {
+              // Parse reliable date string
+              const [year, month] = t.date.split('-').map(Number);
+              // ReportMonth is 0-11, so we compare with month-1 (or adjust logic)
+              // The select returns 0 for Jan, but split returns 1 for Jan
+              // So splitMonth == reportMonth + 1
+              return month === (parseInt(reportMonth as any) + 1) && year === parseInt(reportYear as any);
+          });
+
+          if (filteredTransactions.length === 0) {
+              alert("Não há transações registradas para este período.");
+              setIsGeneratingReport(false);
+              return;
+          }
+
+          const url = await generateMonthlyReport(filteredTransactions, reportMonth, reportYear, schoolLogoUrl);
+          if (url) {
+              window.open(url, '_blank');
+          }
+      } catch (e) {
+          console.error(e);
+          alert("Erro ao gerar relatório.");
+      } finally {
+          setIsGeneratingReport(false);
+      }
+  }
+
   // CRUD Handlers
   const openStudentModal = () => {
-      setNewStudent({ name: '', class: selectedClassTab, guardian: '', status: 'Paid' });
+      setNewStudent({ name: '', class: selectedClassTab, guardian: '', status: 'Pending' });
       setModalType('student');
       setIsModalOpen(true);
   }
 
   const openTransactionModal = (category: 'income' | 'expense') => {
+      const defaultAccount = category === 'income' ? '7.2' : '6.2'; // Default to tuition or salary
       setNewTransaction({ 
           type: '', 
           description: '', 
           amount: '', 
-          date: new Date().toISOString().split('T')[0],
-          paymentMethod: 'Numerário'
+          date: getMaputoDate(), // Use Maputo Timezone
+          paymentMethod: 'Numerário',
+          account_code: defaultAccount,
+          student_id: '',
+          student_name: ''
       });
+      setStudentSearchTerm('');
       setTransactionCategory(category);
       setModalType('transaction');
       setIsModalOpen(true);
@@ -278,25 +519,50 @@ export default function App() {
   }
 
   const handleSaveTransaction = async () => {
-      if (!newTransaction.amount || !newTransaction.description) return;
+      if (!newTransaction.amount || !newTransaction.description || !newTransaction.account_code) {
+          alert("Preencha todos os campos obrigatórios (Descrição, Valor e Categoria PGC).");
+          return;
+      }
       setIsSaving(true);
       try {
+          // Find account name for the type field if not manually set
+          const selectedAccount = PGC_ACCOUNTS.find(a => a.code === newTransaction.account_code);
+          const typeName = selectedAccount ? selectedAccount.name : newTransaction.type;
+
           const amount = parseFloat(newTransaction.amount);
+          
+          // SANITIZATION: Send null if student_id is empty string, otherwise backend might fail if field is int8/uuid
+          const finalStudentId = newTransaction.student_id ? newTransaction.student_id : null;
+          const finalStudentName = newTransaction.student_id ? newTransaction.student_name : null;
+
           const transactionPayload = { 
               ...newTransaction, 
+              type: typeName,
               amount, 
-              category: transactionCategory, 
+              category: transactionCategory,
+              student_id: finalStudentId,
+              student_name: finalStudentName
           };
           
-          const addedTransaction = await addTransactionToDb(transactionPayload);
+          const addedTransaction = await addTransactionToDb(transactionPayload as any);
           
           if (addedTransaction) {
             setTransactions(prev => [addedTransaction, ...prev]);
             setIsModalOpen(false);
 
+            // AUTO-UPDATE STUDENT STATUS
+            // Stronger comparison: Convert both to String to ensure "123" == 123
+            if (transactionCategory === 'income' && addedTransaction.student_id) {
+                const success = await updateStudentStatus(addedTransaction.student_id, 'Paid');
+                if (success) {
+                    setStudents(prev => prev.map(s => 
+                        String(s.id) === String(addedTransaction.student_id) ? { ...s, status: 'Paid' } : s
+                    ));
+                }
+            }
+
             // Automatic Receipt Generation for Incomes
             if (transactionCategory === 'income') {
-                // Pass the custom logo URL
                 const url = await generateReceipt(addedTransaction, schoolLogoUrl);
                 setReceiptUrl(url);
             }
@@ -320,6 +586,17 @@ export default function App() {
               alert("Erro ao excluir transação.");
           }
       }
+  }
+
+  const selectStudentForTransaction = (student: Student) => {
+      setNewTransaction(prev => ({
+          ...prev,
+          student_id: student.id,
+          student_name: student.name,
+          description: prev.description || `Mensalidade - ${student.name}` // Auto-fill desc suggestion
+      }));
+      setStudentSearchTerm(student.name);
+      setShowStudentSuggestions(false);
   }
 
   // AI Handlers
@@ -505,25 +782,78 @@ export default function App() {
           
           {modalType === 'transaction' && (
             <div className="flex flex-col gap-4">
+                
+                {/* STUDENT SELECTOR (FOR INCOME) */}
+                {transactionCategory === 'income' && (
+                    <div className="relative">
+                        <label className="block text-sm font-medium text-text-secondary mb-1">Aluno (Opcional)</label>
+                        <div className="relative">
+                            <span className="absolute left-3 top-2.5 text-gray-400 material-symbols-outlined text-lg">search</span>
+                            <input
+                                className="w-full pl-9 bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
+                                value={studentSearchTerm}
+                                onChange={(e) => {
+                                    setStudentSearchTerm(e.target.value);
+                                    setShowStudentSuggestions(true);
+                                    if(e.target.value === '') {
+                                        setNewTransaction(prev => ({...prev, student_id: '', student_name: ''}));
+                                    }
+                                }}
+                                onFocus={() => setShowStudentSuggestions(true)}
+                                placeholder="Pesquisar aluno..."
+                            />
+                        </div>
+                        {showStudentSuggestions && studentSearchTerm && filteredStudents.length > 0 && (
+                            <ul className="absolute z-20 w-full bg-white dark:bg-surface-dark border border-gray-200 dark:border-gray-700 rounded-lg mt-1 shadow-lg max-h-40 overflow-y-auto">
+                                {filteredStudents.map(student => (
+                                    <li 
+                                        key={student.id}
+                                        className="px-4 py-2 hover:bg-gray-100 dark:hover:bg-white/10 cursor-pointer flex justify-between items-center"
+                                        onClick={() => selectStudentForTransaction(student)}
+                                    >
+                                        <span className="font-medium text-sm">{student.name}</span>
+                                        <span className="text-xs text-text-secondary">{student.class}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        {newTransaction.student_name && !showStudentSuggestions && (
+                            <div className="mt-1 text-xs text-green-600 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-sm">check_circle</span>
+                                Vinculado a: <strong>{newTransaction.student_name}</strong>
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 <div>
-                    <label className="block text-sm font-medium text-text-secondary mb-1">Descrição / Aluno</label>
+                    <label className="block text-sm font-medium text-text-secondary mb-1">Descrição / Detalhe</label>
                     <input 
                     className="w-full bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary" 
                     value={newTransaction.description}
                     onChange={(e) => setNewTransaction({...newTransaction, description: e.target.value})}
-                    placeholder="Ex: Mensalidade - João"
+                    placeholder={transactionCategory === 'income' ? "Ex: Mensalidade - João" : "Ex: Compra de Papel A4"}
                     />
                 </div>
+                
+                {/* PGC ACCOUNT SELECTION */}
+                <div>
+                    <label className="block text-sm font-medium text-text-secondary mb-1">Categoria (Plano de Contas)</label>
+                    <select
+                        className="w-full bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
+                        value={newTransaction.account_code}
+                        onChange={(e) => setNewTransaction({...newTransaction, account_code: e.target.value})}
+                    >
+                        <option value="">Selecione uma conta...</option>
+                        {getAccountsForTransactionType(transactionCategory).map(acc => (
+                            <option key={acc.code} value={acc.code}>
+                                {acc.code} - {acc.name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-sm font-medium text-text-secondary mb-1">Tipo</label>
-                        <input 
-                            className="w-full bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary" 
-                            value={newTransaction.type}
-                            onChange={(e) => setNewTransaction({...newTransaction, type: e.target.value})}
-                            placeholder="Ex: Mensalidade"
-                        />
-                    </div>
                     <div>
                         <label className="block text-sm font-medium text-text-secondary mb-1">Valor (MZN)</label>
                         <input 
@@ -533,9 +863,14 @@ export default function App() {
                             onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})}
                             placeholder="0.00"
                         />
+                        {transactionCategory === 'income' && newTransaction.account_code === '7.2' && (
+                            <p className="text-xs text-text-secondary mt-1">
+                                {parseFloat(newTransaction.amount) > BASE_TUITION_VALUE 
+                                    ? `* Inclui multa de 25% (${formatCurrency(BASE_TUITION_VALUE * PENALTY_PERCENTAGE)})` 
+                                    : `* Valor base até dia ${PENALTY_DAY_THRESHOLD}`}
+                            </p>
+                        )}
                     </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-text-secondary mb-1">Data</label>
                         <input 
@@ -545,18 +880,18 @@ export default function App() {
                             onChange={(e) => setNewTransaction({...newTransaction, date: e.target.value})}
                         />
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-text-secondary mb-1">Forma de Pagamento</label>
-                        <select
-                             className="w-full bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
-                             value={newTransaction.paymentMethod}
-                             onChange={(e) => setNewTransaction({...newTransaction, paymentMethod: e.target.value})}
-                        >
-                            {PAYMENT_METHODS.map(method => (
-                                <option key={method} value={method}>{method}</option>
-                            ))}
-                        </select>
-                    </div>
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-text-secondary mb-1">Forma de Pagamento</label>
+                    <select
+                            className="w-full bg-gray-50 dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
+                            value={newTransaction.paymentMethod}
+                            onChange={(e) => setNewTransaction({...newTransaction, paymentMethod: e.target.value})}
+                    >
+                        {PAYMENT_METHODS.map(method => (
+                            <option key={method} value={method}>{method}</option>
+                        ))}
+                    </select>
                 </div>
                 <button 
                     onClick={handleSaveTransaction} 
@@ -584,6 +919,7 @@ export default function App() {
           <SidebarItem icon="trending_up" label="Entradas" active={activeView === ViewState.INCOMES} onClick={() => setActiveView(ViewState.INCOMES)} />
           <SidebarItem icon="trending_down" label="Saídas" active={activeView === ViewState.EXPENSES} onClick={() => setActiveView(ViewState.EXPENSES)} />
           <SidebarItem icon="group" label="Alunos" active={activeView === ViewState.STUDENTS} onClick={() => setActiveView(ViewState.STUDENTS)} />
+          <SidebarItem icon="description" label="Relatórios" active={activeView === ViewState.REPORTS} onClick={() => setActiveView(ViewState.REPORTS)} />
           <SidebarItem icon="settings" label="Configurações" active={activeView === ViewState.SETTINGS} onClick={() => setActiveView(ViewState.SETTINGS)} />
           
           <div className="my-2 border-t border-gray-100 dark:border-gray-800"></div>
@@ -608,6 +944,7 @@ export default function App() {
                activeView === ViewState.INCOMES ? 'Gestão de Entradas' :
                activeView === ViewState.EXPENSES ? 'Gestão de Saídas' :
                activeView === ViewState.STUDENTS ? 'Gestão de Alunos' :
+               activeView === ViewState.REPORTS ? 'Relatórios Financeiros' :
                activeView === ViewState.DASHBOARD ? 'Visão Geral' : activeView}
           </h2>
           
@@ -636,22 +973,47 @@ export default function App() {
             {/* DASHBOARD VIEW */}
             {activeView === ViewState.DASHBOARD && (
               <div className="flex flex-col gap-8 animate-fade-in">
+                
+                {/* PERIOD SELECTOR TABS */}
+                <div className="flex border-b border-gray-200 dark:border-gray-800 overflow-x-auto">
+                    {[
+                        { id: 'daily', label: 'Diário' },
+                        { id: 'weekly', label: 'Semanal' },
+                        { id: 'monthly', label: 'Mensal' },
+                        { id: 'quarterly', label: 'Trimestral' },
+                        { id: 'semestral', label: 'Semestral' },
+                        { id: 'annual', label: 'Anual' },
+                    ].map((period) => (
+                        <button
+                            key={period.id}
+                            onClick={() => setDashboardPeriod(period.id as DashboardPeriod)}
+                            className={`px-6 py-3 text-sm font-bold border-b-2 transition-colors whitespace-nowrap ${
+                                dashboardPeriod === period.id 
+                                ? 'border-primary text-primary' 
+                                : 'border-transparent text-text-secondary hover:text-text-main hover:border-gray-300'
+                            }`}
+                        >
+                            {period.label}
+                        </button>
+                    ))}
+                </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <Card 
-                        title="Entradas Totais" 
+                        title={`Entradas (${dashboardPeriod === 'daily' ? 'Hoje' : dashboardPeriod === 'annual' ? 'Este Ano' : 'Período'})`}
                         value={formatCurrency(dashboardData.income)} 
                         trend="Atualizado agora" 
                         positive icon="arrow_upward" 
                     />
                     <Card 
-                        title="Saídas Totais" 
+                        title={`Saídas (${dashboardPeriod === 'daily' ? 'Hoje' : dashboardPeriod === 'annual' ? 'Este Ano' : 'Período'})`}
                         value={formatCurrency(dashboardData.expense)} 
                         trend="Atualizado agora" 
                         positive={false} 
                         icon="arrow_downward" 
                     />
                     <Card 
-                        title="Saldo Atual" 
+                        title="Saldo do Período" 
                         value={formatCurrency(dashboardData.balance)} 
                         icon="account_balance_wallet" 
                         positive={dashboardData.balance >= 0}
@@ -659,14 +1021,13 @@ export default function App() {
                     />
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1">
                     <div className="bg-white dark:bg-surface-dark p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800">
-                        <h3 className="text-lg font-bold mb-4">Fluxo de Caixa Mensal</h3>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold">Fluxo de Caixa Mensal (Visão Anual)</h3>
+                            <span className="text-xs text-text-secondary bg-gray-100 dark:bg-white/10 px-2 py-1 rounded">2024</span>
+                        </div>
                         <CashFlowChart data={dashboardData.chartData} />
-                    </div>
-                    <div className="bg-white dark:bg-surface-dark p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800">
-                        <h3 className="text-lg font-bold mb-4">Comparativo Anual</h3>
-                        <TrendChart data={dashboardData.trendData} />
                     </div>
                 </div>
               </div>
@@ -693,7 +1054,7 @@ export default function App() {
                                 <tr>
                                     <th className="px-6 py-4 font-semibold">Data</th>
                                     <th className="px-6 py-4 font-semibold">Descrição</th>
-                                    <th className="px-6 py-4 font-semibold">Tipo</th>
+                                    <th className="px-6 py-4 font-semibold">Conta (PGC)</th>
                                     <th className="px-6 py-4 font-semibold text-right">Valor</th>
                                     <th className="px-6 py-4 font-semibold text-right">Ações</th>
                                 </tr>
@@ -701,10 +1062,16 @@ export default function App() {
                             <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                                 {transactions.filter(t => t.category === 'income').map(t => (
                                     <tr key={t.id} className="hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
-                                        <td className="px-6 py-4 text-text-secondary">{new Date(t.date).toLocaleDateString()}</td>
-                                        <td className="px-6 py-4 font-medium text-text-main dark:text-gray-100">{t.description}</td>
+                                        <td className="px-6 py-4 text-text-secondary">{t.date.split('-').reverse().join('/')}</td>
+                                        <td className="px-6 py-4 font-medium text-text-main dark:text-gray-100">
+                                            {t.description}
+                                            {t.student_name && <span className="block text-xs text-gray-500 font-normal">Aluno: {t.student_name}</span>}
+                                        </td>
                                         <td className="px-6 py-4 text-text-secondary">
-                                            <span className="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded text-xs font-bold">{t.type}</span>
+                                            <div className="flex flex-col">
+                                                <span className="text-xs font-bold text-gray-500">{t.account_code || 'N/A'}</span>
+                                                <span className="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded text-xs font-bold w-fit">{t.type}</span>
+                                            </div>
                                         </td>
                                         <td className="px-6 py-4 text-right font-bold text-primary">{formatCurrency(t.amount)}</td>
                                         <td className="px-6 py-4 text-right">
@@ -756,7 +1123,7 @@ export default function App() {
                              <tr>
                                  <th className="px-6 py-4 font-semibold">Data</th>
                                  <th className="px-6 py-4 font-semibold">Descrição</th>
-                                 <th className="px-6 py-4 font-semibold">Tipo</th>
+                                 <th className="px-6 py-4 font-semibold">Conta (PGC)</th>
                                  <th className="px-6 py-4 font-semibold text-right">Valor</th>
                                  <th className="px-6 py-4 font-semibold text-right">Ações</th>
                              </tr>
@@ -764,10 +1131,13 @@ export default function App() {
                          <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                              {transactions.filter(t => t.category === 'expense').map(t => (
                                  <tr key={t.id} className="hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
-                                     <td className="px-6 py-4 text-text-secondary">{new Date(t.date).toLocaleDateString()}</td>
+                                     <td className="px-6 py-4 text-text-secondary">{t.date.split('-').reverse().join('/')}</td>
                                      <td className="px-6 py-4 font-medium text-text-main dark:text-gray-100">{t.description}</td>
                                      <td className="px-6 py-4 text-text-secondary">
-                                         <span className="px-2 py-1 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 rounded text-xs font-bold">{t.type}</span>
+                                         <div className="flex flex-col">
+                                            <span className="text-xs font-bold text-gray-500">{t.account_code || 'N/A'}</span>
+                                            <span className="px-2 py-1 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 rounded text-xs font-bold w-fit">{t.type}</span>
+                                         </div>
                                      </td>
                                      <td className="px-6 py-4 text-right font-bold text-red-500">{formatCurrency(t.amount)}</td>
                                      <td className="px-6 py-4 text-right">
@@ -883,6 +1253,63 @@ export default function App() {
                         </table>
                     </div>
                     )}
+                </div>
+            )}
+
+            {/* REPORTS VIEW */}
+            {activeView === ViewState.REPORTS && (
+                <div className="bg-white dark:bg-surface-dark p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800 animate-fade-in">
+                    <h3 className="text-xl font-bold text-text-main dark:text-white mb-2">Relatórios Financeiros</h3>
+                    <p className="text-text-secondary mb-6">Gere extratos detalhados de transações por período.</p>
+                    
+                    <div className="p-6 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-white/5 flex flex-col gap-6 max-w-lg">
+                        <div className="flex flex-col gap-2">
+                            <label className="text-sm font-semibold text-text-main dark:text-gray-200">Selecionar Período</label>
+                            <div className="flex gap-4">
+                                <select 
+                                    className="flex-1 bg-white dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
+                                    value={reportMonth}
+                                    onChange={(e) => setReportMonth(parseInt(e.target.value))}
+                                >
+                                    {["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"].map((m, i) => (
+                                        <option key={i} value={i}>{m}</option>
+                                    ))}
+                                </select>
+                                <select 
+                                    className="w-32 bg-white dark:bg-background-dark border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 outline-none focus:border-primary"
+                                    value={reportYear}
+                                    onChange={(e) => setReportYear(parseInt(e.target.value))}
+                                >
+                                    {[2024, 2025, 2026, 2027].map(y => (
+                                        <option key={y} value={y}>{y}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800 text-sm text-blue-800 dark:text-blue-300 flex gap-3">
+                            <span className="material-symbols-outlined text-lg">info</span>
+                            <p>O extrato gerado incluirá todas as entradas e saídas do mês selecionado, com cálculo de saldo e detalhes de pagamento.</p>
+                        </div>
+
+                        <button 
+                            onClick={handleGenerateReport}
+                            disabled={isGeneratingReport}
+                            className="bg-primary hover:bg-primary-dark text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                        >
+                            {isGeneratingReport ? (
+                                <>
+                                    <span className="material-symbols-outlined animate-spin text-lg">progress_activity</span>
+                                    Gerando PDF...
+                                </>
+                            ) : (
+                                <>
+                                    <span className="material-symbols-outlined text-lg">picture_as_pdf</span>
+                                    Gerar Extrato Mensal
+                                </>
+                            )}
+                        </button>
+                    </div>
                 </div>
             )}
 

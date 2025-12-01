@@ -1,3 +1,4 @@
+
 import { supabase } from './supabaseClient';
 import { Transaction, Student } from '../types';
 
@@ -70,6 +71,19 @@ export const addStudentToDb = async (student: Omit<Student, 'id'>): Promise<Stud
     return null;
   }
   return data as Student;
+};
+
+export const updateStudentStatus = async (id: string | number, status: 'Paid' | 'Late' | 'Pending'): Promise<boolean> => {
+  const { error } = await supabase
+    .from('students')
+    .update({ status: status })
+    .eq('id', id);
+
+  if (error) {
+    console.error('Supabase Error (updateStudentStatus):', error.message);
+    return false;
+  }
+  return true;
 };
 
 export const deleteStudentFromDb = async (id: string | number): Promise<boolean> => {
