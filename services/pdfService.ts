@@ -1,11 +1,6 @@
-
 import { Transaction } from "../types";
-
-declare global {
-  interface Window {
-    jspdf: any;
-  }
-}
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // Interface for Image Data with dimensions
 interface ProcessedImage {
@@ -76,12 +71,6 @@ const getImageData = async (url: string): Promise<ProcessedImage> => {
 const DEFAULT_LOGO_URL = "https://drive.google.com/uc?export=view&id=1-EoFPUZzWgms4VoE5uoYXBwOphg8Fz1J";
 
 export const generateReceipt = async (transaction: Transaction, customLogoUrl?: string): Promise<string> => {
-  if (!window.jspdf) {
-    console.error("jsPDF not loaded");
-    return "";
-  }
-
-  const { jsPDF } = window.jspdf;
   
   // 1. Orientação: Landscape (Paisagem) - Duas vias
   const doc = new jsPDF({
@@ -91,8 +80,8 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
   });
 
   // --- CONFIGURAÇÃO ---
-  const primaryColor = [19, 236, 128]; // #13ec80
-  const darkColor = [16, 34, 25]; // #102219
+  const primaryColor: [number, number, number] = [19, 236, 128]; // #13ec80
+  const darkColor: [number, number, number] = [16, 34, 25]; // #102219
   
   // Dimensões A4 Paisagem: 297mm x 210mm
   const pageWidth = doc.internal.pageSize.width; // 297
@@ -212,7 +201,7 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
       
       cursorY += 5;
 
-      // --- ADDED: DATA DO PAGAMENTO ---
+      // --- DATA DO PAGAMENTO ---
       // Fix date format manually to avoid timezone shifts
       const paymentDate = transaction.date.split('-').reverse().join('/');
       doc.text(`Data Pagamento: ${paymentDate}`, offsetX + margin, cursorY, { align: "left" });
@@ -237,16 +226,40 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
 
       // --- TABELA DE DADOS ---
       const tableColumn = ["Descrição", "Forma Pagto", "Tipo", "Valor (MZN)"];
-      const tableRows = [
-        [
-          transaction.description,
-          transaction.paymentMethod || "N/A",
-          transaction.type,
-          transaction.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })
-        ]
-      ];
+      
+      const BASE_TUITION_VALUE = 2310;
+      let tableRows = [];
 
-      doc.autoTable({
+      // LÓGICA DE MULTA: Se for mensalidade (7.2) e valor maior que o base
+      if (transaction.account_code === '7.2' && transaction.amount > BASE_TUITION_VALUE) {
+          const penalty = transaction.amount - BASE_TUITION_VALUE;
+          tableRows = [
+            [
+              transaction.description + " (Valor Base)",
+              transaction.paymentMethod || "N/A",
+              transaction.type,
+              BASE_TUITION_VALUE.toLocaleString('pt-BR', { minimumFractionDigits: 2 })
+            ],
+            [
+              "Multa por Atraso (25%)",
+              "-",
+              "Multa",
+              penalty.toLocaleString('pt-BR', { minimumFractionDigits: 2 })
+            ]
+          ];
+      } else {
+          // Normal
+          tableRows = [
+            [
+              transaction.description,
+              transaction.paymentMethod || "N/A",
+              transaction.type,
+              transaction.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })
+            ]
+          ];
+      }
+
+      autoTable(doc, {
         head: [tableColumn],
         body: tableRows,
         startY: cursorY,
@@ -318,20 +331,15 @@ export const generateReceipt = async (transaction: Transaction, customLogoUrl?: 
 
 // --- GERAÇÃO DE RELATÓRIO MENSAL (EXTRATO) ---
 export const generateMonthlyReport = async (transactions: Transaction[], month: number, year: number, customLogoUrl?: string): Promise<string> => {
-    if (!window.jspdf) {
-      console.error("jsPDF not loaded");
-      return "";
-    }
-  
-    const { jsPDF } = window.jspdf;
+    
     const doc = new jsPDF({
       orientation: "portrait",
       unit: "mm",
       format: "a4"
     });
   
-    const primaryColor = [19, 236, 128]; 
-    const darkColor = [16, 34, 25];
+    const primaryColor: [number, number, number] = [19, 236, 128]; 
+    const darkColor: [number, number, number] = [16, 34, 25];
     const pageWidth = doc.internal.pageSize.width;
     const pageHeight = doc.internal.pageSize.height;
     
@@ -469,7 +477,7 @@ export const generateMonthlyReport = async (transactions: Transaction[], month: 
       }
     ]);
   
-    doc.autoTable({
+    autoTable(doc, {
       head: [tableColumn],
       body: tableRows,
       startY: cursorY,
@@ -496,4 +504,4 @@ export const generateMonthlyReport = async (transactions: Transaction[], month: 
     }
   
     return doc.output("bloburl");
-  };
+};

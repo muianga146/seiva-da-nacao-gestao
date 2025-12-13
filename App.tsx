@@ -4,6 +4,8 @@ import { ViewState, Transaction, Student, ImageSize, ChatMessage, PGCAccount } f
 import { CashFlowChart } from './components/DashboardCharts';
 import { generateImage, chatWithAI, generateSpeech } from './services/geminiService';
 import { generateReceipt, generateMonthlyReport } from './services/pdfService';
+import { signIn, signUp, signOut } from './services/authService';
+import { supabase } from './services/supabaseClient';
 import { 
   fetchTransactions, 
   addTransactionToDb, 
@@ -19,6 +21,10 @@ const SCHOOL_CLASSES = ["1ª Classe", "2ª Classe", "3ª Classe", "4ª Classe", 
 const PAYMENT_METHODS = ["Numerário", "M-Pesa", "Transferência", "POS"];
 // Updated to Google Drive Direct Link from user request
 const DEFAULT_LOGO = "https://drive.google.com/uc?export=view&id=1-EoFPUZzWgms4VoE5uoYXBwOphg8Fz1J";
+
+// ADMIN CREDENTIALS
+const MASTER_EMAIL = "cleytonbmuianga@gmail.com";
+const MASTER_PASS = "Seivadanacaomussumbuluco2026";
 
 // TUITION LOGIC CONSTANTS
 const BASE_TUITION_VALUE = 2310;
@@ -140,10 +146,15 @@ const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose:
 // --- MAIN APP COMPONENT ---
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [pin, setPin] = useState(['', '', '', '', '', '']);
+  // AUTH STATE
+  const [session, setSession] = useState<any>(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  // APP VIEW STATE
   const [activeView, setActiveView] = useState<ViewState>(ViewState.DASHBOARD);
-  const pinRefs = useRef<(HTMLInputElement | null)[]>([]);
   
   // DATA STATE
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -213,12 +224,27 @@ export default function App() {
   const [ttsText, setTtsText] = useState('');
   const [isTtsLoading, setIsTtsLoading] = useState(false);
 
+  // --- EFFECT: AUTH SESSION ---
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
   // --- EFFECT: LOAD DATA AND SYNC STATUS ---
   useEffect(() => {
-    if (isAuthenticated) {
+    if (session) {
       loadData();
     }
-  }, [isAuthenticated]);
+  }, [session]);
 
   const loadData = async () => {
     setIsLoadingData(true);
@@ -398,23 +424,52 @@ export default function App() {
 
 
   // --- HANDLERS ---
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setIsAuthLoading(true);
 
-  const handlePinChange = (index: number, value: string) => {
-    if (!/^\d*$/.test(value)) return;
-    const newPin = [...pin];
-    newPin[index] = value;
-    setPin(newPin);
-    if (value && index < 5) pinRefs.current[index + 1]?.focus();
-    if (newPin.join('') === '123456') {
-      checkApiKey().then(() => setIsAuthenticated(true));
+    try {
+        // Attempt normal Sign In
+        const { error } = await signIn(authEmail, authPassword);
+        
+        if (error) {
+             // AUTO-PROVISIONING LOGIC FOR MASTER ADMIN
+             // If login fails (user doesn't exist yet) but credentials match master, create it silently.
+             if (authEmail === MASTER_EMAIL && authPassword === MASTER_PASS) {
+                 console.log("Master Admin not found. Attempting auto-provisioning...");
+                 const { error: signUpError } = await signUp(authEmail, authPassword);
+                 
+                 if (!signUpError) {
+                     alert("Conta administrativa inicializada com sucesso! Bem-vindo.");
+                     // Supabase typically logs in automatically after sign up if email confirm is off
+                     // If not, we try sign in again
+                     const { error: retryError } = await signIn(authEmail, authPassword);
+                     if (retryError) throw retryError;
+                 } else {
+                     // If sign up fails (e.g. rate limit or other issue), throw original login error
+                     throw error;
+                 }
+                 // Check for API Key on success
+                 checkApiKey();
+             } else {
+                 throw error;
+             }
+        } else {
+            // Normal success path
+            checkApiKey();
+        }
+    } catch (err: any) {
+        setAuthError('Credenciais inválidas. Acesso restrito à administração.');
+    } finally {
+        setIsAuthLoading(false);
     }
   };
 
-  const handleKeyDown = (index: number, e: React.KeyboardEvent) => {
-      if (e.key === 'Backspace' && !pin[index] && index > 0) {
-          pinRefs.current[index - 1]?.focus();
-      }
-  }
+  const handleLogout = async () => {
+      await signOut();
+      setSession(null);
+  };
 
   const checkApiKey = async () => {
       if ((window as any).aistudio) {
@@ -648,7 +703,7 @@ export default function App() {
   }
 
   // --- RENDER AUTH SCREEN ---
-  if (!isAuthenticated) {
+  if (!session) {
     return (
       <div className="relative flex h-screen w-full flex-col items-center justify-center bg-background-light dark:bg-background-dark overflow-hidden">
         <div className="absolute inset-0 opacity-10 bg-[url('https://lh3.googleusercontent.com/aida-public/AB6AXuCZDNp2Av10aHiJmlEXi0rniz_bjBSeSZpQzEuLmF4GyO-vlXZuY5DaRqrv9x_v708sEZjAubHOzqUO0GB3S9ITDDNnkzOtn3wKd6RdmZQGI8CV1EBGjBzW-XUVrVWcWS0XEJKojsjPQ7o8fHgEz9lTr8vLQU4XK8WO7k6YRPfsPrKX8dYGGkPl-u9ZN5ToQr2jhRPu8nr_rGFC9s5YALZMjWSf4M8q9DrA6pvy7zqGc5ohf7l2_Jy8vMFi1MlTN__siPQsa8hcovPr')] bg-cover bg-center" />
@@ -657,25 +712,58 @@ export default function App() {
             <div className="size-16 bg-primary rounded-full flex items-center justify-center shadow-lg shadow-primary/30">
                <span className="material-symbols-outlined text-white text-3xl">lock</span>
             </div>
-            <h1 className="text-2xl font-bold text-text-main dark:text-white">Acesso Restrito</h1>
-            <p className="text-text-secondary dark:text-gray-400 text-center">Insira seu PIN (123456) para acessar o sistema Seiva da Nação.</p>
+            <h1 className="text-2xl font-bold text-text-main dark:text-white">Seiva da Nação</h1>
+            <p className="text-text-secondary dark:text-gray-400 text-center">
+                Acesso Restrito à Administração
+            </p>
             
-            <div className="flex gap-3">
-              {pin.map((digit, i) => (
-                <input
-                  key={i}
-                  ref={el => pinRefs.current[i] = el}
-                  type="password"
-                  maxLength={1}
-                  className="w-12 h-16 text-center text-2xl font-bold rounded-lg border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-background-dark focus:border-primary focus:ring-primary outline-none transition-all"
-                  value={digit}
-                  onChange={e => handlePinChange(i, e.target.value)}
-                  onKeyDown={e => handleKeyDown(i, e)}
-                />
-              ))}
-            </div>
+            <form onSubmit={handleAuth} className="w-full flex flex-col gap-4">
+                {authError && (
+                    <div className="p-3 bg-red-100 text-red-600 text-sm rounded-lg flex items-center gap-2">
+                        <span className="material-symbols-outlined text-sm">error</span>
+                        {authError}
+                    </div>
+                )}
+                
+                <div className="space-y-1">
+                    <label className="text-xs font-bold text-text-secondary uppercase">E-mail Administrativo</label>
+                    <input 
+                        type="email" 
+                        required
+                        className="w-full px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-background-dark focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                        placeholder="Digite o e-mail administrativo"
+                        value={authEmail}
+                        onChange={e => setAuthEmail(e.target.value)}
+                    />
+                </div>
+
+                <div className="space-y-1">
+                    <label className="text-xs font-bold text-text-secondary uppercase">Senha Mestra</label>
+                    <input 
+                        type="password" 
+                        required
+                        className="w-full px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-background-dark focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                        placeholder="••••••••"
+                        value={authPassword}
+                        onChange={e => setAuthPassword(e.target.value)}
+                    />
+                </div>
+
+                <button 
+                    type="submit" 
+                    disabled={isAuthLoading}
+                    className="w-full bg-primary hover:bg-primary-dark text-white font-bold py-3 rounded-lg mt-2 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed shadow-md hover:shadow-lg"
+                >
+                    {isAuthLoading ? (
+                        <span className="material-symbols-outlined animate-spin">progress_activity</span>
+                    ) : (
+                        'Acessar Sistema'
+                    )}
+                </button>
+            </form>
           </div>
         </div>
+        <p className="absolute bottom-4 text-xs text-gray-400">Sistema Seguro v1.0 • Single Ecosystem Auth</p>
       </div>
     );
   }
@@ -928,7 +1016,7 @@ export default function App() {
         </nav>
 
         <div className="p-4 border-t border-gray-200 dark:border-gray-800">
-            <button className="flex items-center gap-3 px-3 py-2 text-text-secondary hover:text-red-500 transition-colors w-full" onClick={() => window.location.reload()}>
+            <button className="flex items-center gap-3 px-3 py-2 text-text-secondary hover:text-red-500 transition-colors w-full" onClick={handleLogout}>
                 <span className="material-symbols-outlined">logout</span>
                 <span className="text-sm font-medium">Sair</span>
             </button>
@@ -960,8 +1048,14 @@ export default function App() {
               <span className="material-symbols-outlined">notifications</span>
               <span className="absolute top-2 right-2 size-2 bg-red-500 rounded-full border border-white"></span>
             </button>
-            <div className="size-8 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                 <img src="https://picsum.photos/100/100" alt="User" className="w-full h-full object-cover"/>
+            <div className="flex items-center gap-3">
+                <div className="text-right hidden md:block">
+                    <p className="text-sm font-bold">{session.user.email}</p>
+                    <p className="text-xs text-text-secondary">Administrador</p>
+                </div>
+                <div className="size-8 rounded-full bg-primary flex items-center justify-center text-white font-bold">
+                     {session.user.email?.charAt(0).toUpperCase()}
+                </div>
             </div>
           </div>
         </header>
@@ -1025,7 +1119,7 @@ export default function App() {
                     <div className="bg-white dark:bg-surface-dark p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-800">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-lg font-bold">Fluxo de Caixa Mensal (Visão Anual)</h3>
-                            <span className="text-xs text-text-secondary bg-gray-100 dark:bg-white/10 px-2 py-1 rounded">2024</span>
+                            <span className="text-xs text-text-secondary bg-gray-100 dark:bg-white/10 px-2 py-1 rounded">{new Date().getFullYear()}</span>
                         </div>
                         <CashFlowChart data={dashboardData.chartData} />
                     </div>
@@ -1280,7 +1374,7 @@ export default function App() {
                                     value={reportYear}
                                     onChange={(e) => setReportYear(parseInt(e.target.value))}
                                 >
-                                    {[2024, 2025, 2026, 2027].map(y => (
+                                    {Array.from({length: 5}, (_, i) => new Date().getFullYear() - 2 + i).map(y => (
                                         <option key={y} value={y}>{y}</option>
                                     ))}
                                 </select>

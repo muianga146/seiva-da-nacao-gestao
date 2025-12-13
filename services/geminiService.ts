@@ -76,7 +76,7 @@ export const generateSpeech = async (text: string): Promise<AudioBuffer | null> 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (!base64Audio) return null;
 
-      // Decode logic
+      // Decode base64 to byte array
       const binaryString = atob(base64Audio);
       const len = binaryString.length;
       const bytes = new Uint8Array(len);
@@ -86,8 +86,21 @@ export const generateSpeech = async (text: string): Promise<AudioBuffer | null> 
 
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
       
-      // Simple decoding wrapper
-      const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+      // Manual PCM Decoding (16-bit little endian, 24000Hz, 1 channel)
+      // The model returns raw PCM, not a WAV/MP3 file, so audioContext.decodeAudioData will fail.
+      const dataInt16 = new Int16Array(bytes.buffer);
+      const numChannels = 1;
+      const sampleRate = 24000;
+      const frameCount = dataInt16.length / numChannels;
+      const audioBuffer = audioContext.createBuffer(numChannels, frameCount, sampleRate);
+
+      for (let channel = 0; channel < numChannels; channel++) {
+        const channelData = audioBuffer.getChannelData(channel);
+        for (let i = 0; i < frameCount; i++) {
+          channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+        }
+      }
+      
       return audioBuffer;
 
   } catch (error) {
