@@ -4,21 +4,29 @@ import react from '@vitejs/plugin-react'
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  // Carrega variáveis de ambiente (como API_KEY) para uso no código cliente
-  // Using '.' instead of process.cwd() to prevent TypeScript errors about missing types
+  // Carrega variáveis de ambiente
   const env = loadEnv(mode, '.', '');
   
   return {
     plugins: [react()],
     define: {
-      // Garante que process.env.API_KEY funcione no navegador conforme as diretrizes
+      // Injeta a API Key de forma segura no código client-side
       'process.env.API_KEY': JSON.stringify(env.API_KEY),
-      // Fallback seguro para evitar 'process is not defined'
-      'process.env': {}
+      // Polyfill para evitar crashes de bibliotecas que esperam Node.js process
+      'process.env': JSON.stringify({})
     },
     build: {
-      // Otimizações de build para evitar erros de memória em máquinas pequenas da Vercel
-      chunkSizeWarningLimit: 1000,
+      // Aumenta o limite de aviso de chunk para evitar warnings no log de build
+      chunkSizeWarningLimit: 1600,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ['react', 'react-dom', 'recharts', '@supabase/supabase-js'],
+            pdf: ['jspdf', 'jspdf-autotable'],
+            ai: ['@google/genai']
+          }
+        }
+      }
     }
   }
 })

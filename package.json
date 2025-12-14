@@ -2,15 +2,18 @@
 {
   "name": "seiva-da-nacao-web",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "*",
+    "@google/genai": "latest",
     "@supabase/supabase-js": "^2.39.3",
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.5.31",
