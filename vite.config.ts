@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     define: {
       // Injeta explicitamente a API_KEY para o código do cliente
-      'process.env.API_KEY': JSON.stringify(env.API_KEY || ''),
+      // Prioriza VITE_API_KEY se existir, senão usa API_KEY direta
+      'process.env.API_KEY': JSON.stringify(env.VITE_API_KEY || env.API_KEY || ''),
       // Polyfill global de 'process' para compatibilidade com bibliotecas Node-like (Gemini SDK)
       'process.env': JSON.stringify(env)
     },
